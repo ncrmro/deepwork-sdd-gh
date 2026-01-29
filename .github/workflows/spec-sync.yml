@@ -1,0 +1,137 @@
+name: Spec Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "specs/**"
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync specs to issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const specsDir = 'specs';
+            if (!fs.existsSync(specsDir)) {
+              console.log('No specs/ directory found');
+              return;
+            }
+
+            const specDirs = fs.readdirSync(specsDir, { withFileTypes: true })
+              .filter(d => d.isDirectory())
+              .map(d => d.name);
+
+            for (const specName of specDirs) {
+              const tasksPath = path.join(specsDir, specName, 'tasks.md');
+              if (!fs.existsSync(tasksPath)) {
+                console.log(`No tasks.md in specs/${specName}, skipping`);
+                continue;
+              }
+
+              const tasksContent = fs.readFileSync(tasksPath, 'utf8');
+
+              // Parse checkboxes
+              const checkboxes = [];
+              for (const line of tasksContent.split('\n')) {
+                const checked = line.match(/^\s*-\s*\[x\]\s+(.*)/i);
+                const unchecked = line.match(/^\s*-\s*\[ \]\s+(.*)/);
+                if (checked) {
+                  checkboxes.push({ text: checked[1].trim(), done: true });
+                } else if (unchecked) {
+                  checkboxes.push({ text: unchecked[1].trim(), done: false });
+                }
+              }
+
+              const total = checkboxes.length;
+              const completed = checkboxes.filter(c => c.done).length;
+
+              // Build issue body
+              const taskList = checkboxes
+                .map(c => `- [${c.done ? 'x' : ' '}] ${c.text}`)
+                .join('\n');
+
+              const specLink = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/specs/${specName}`;
+
+              const body = [
+                `## Spec: ${specName}`,
+                '',
+                `**Progress**: ${completed}/${total} tasks`,
+                '',
+                '### Tasks',
+                '',
+                taskList,
+                '',
+                '---',
+                '',
+                '### Spec Files',
+                '',
+                `- [spec.md](${specLink}/spec.md)`,
+                `- [plan.md](${specLink}/plan.md)`,
+                `- [tasks.md](${specLink}/tasks.md)`,
+                '',
+                '_This issue is automatically managed by the [spec-sync](.github/workflows/spec-sync.yml) workflow._',
+              ].join('\n');
+
+              const label = `spec:${specName}`;
+
+              // Ensure label exists
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label,
+                });
+              } catch {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label,
+                  color: '5319e7',
+                  description: `Tracks spec: ${specName}`,
+                });
+              }
+
+              // Search for existing issue with this label
+              const { data: issues } = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: label,
+                state: 'open',
+                per_page: 1,
+              });
+
+              const title = `[Spec] ${specName} (${completed}/${total})`;
+
+              if (issues.length > 0) {
+                const issue = issues[0];
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  title,
+                  body,
+                });
+                console.log(`Updated issue #${issue.number} for spec: ${specName}`);
+              } else {
+                const { data: created } = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                  labels: [label],
+                });
+                console.log(`Created issue #${created.number} for spec: ${specName}`);
+              }
+            }
